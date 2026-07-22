@@ -12,25 +12,25 @@ graph TD
     subgraph "Google Cloud Project"
         subgraph "VPC Network (cm-sandbox-vpc)"
             subgraph "Private Subnet (10.0.0.0/16)"
-                GKE[GKE Autopilot Cluster\n(Agent Sandbox Enabled)]
-                PVC[(PersistentVolumeClaim\n10Gi)]
+                GKE["GKE Autopilot Cluster<br>(Agent Sandbox Enabled)"]
+                PVC[("PersistentVolumeClaim<br>10Gi")]
                 
-                subgraph "Agent Sandbox Pool"
+                subgraph AgentSandboxPool ["Agent Sandbox Pool"]
                     W[SandboxWarmPool]
-                    Pod1[Codemender Sandbox Pod 1]
-                    Pod2[Codemender Sandbox Pod n (Warm)]
+                    Pod1["Codemender Sandbox Pod 1"]
+                    Pod2["Codemender Sandbox Pod n (Warm)"]
                     W -.-> Pod2
-                ]
+                end
                 
                 Pod1 --- PVC
-                Pod1 -.->|GCS Fuse| FUSE[GCS Fuse Sidecar]
+                Pod1 -.->|GCS Fuse| FUSE["GCS Fuse Sidecar"]
             end
         end
         
-        GAR[(Artifact Registry)]
-        GCS_SRC[(Source Code Bucket)]
-        GCS_OUT[(Output Reports Bucket)]
-        API[Codemender API]
+        GAR[("Artifact Registry")]
+        GCS_SRC[("Source Code Bucket")]
+        GCS_OUT[("Output Reports Bucket")]
+        API["Codemender API"]
     end
     
     GKE -->|Private Google Access| API
