@@ -1,0 +1,69 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: codemender-template
+  namespace: default
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox-type: codemender-runtime
+      annotations:
+        gke-gcsfuse/volumes: "true"
+    spec:
+      runtimeClassName: gvisor # Required
+      automountServiceAccountToken: false # Required
+      serviceAccountName: codemender-sa
+      securityContext:
+        runAsNonRoot: true # Required
+        runAsUser: 1000
+      nodeSelector:
+        sandbox.gke.io/runtime: gvisor # Required
+      tolerations:
+      - key: "sandbox.gke.io/runtime"
+        value: "gvisor"
+        effect: "NoSchedule" # Required
+      containers:
+      - name: codemender-worker
+        # The image will be replaced by the deploy script to match the region/project
+        image: ${LOCATION}-docker.pkg.dev/${PROJECT_ID}/cm-sandbox-repo/codemender-worker:latest
+        command: ["/bin/sh", "-c"]
+        # Keep the container running so we can exec into it. The codemender client can be run manually or configured later.
+        args: ["sleep 3600000"]
+        volumeMounts:
+        - mountPath: /workspace
+          name: codemender-storage
+        - name: gcs-fuse-src
+          mountPath: /workspace/src
+        - name: gcs-fuse-out
+          mountPath: /workspace/out
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "1000m"
+            memory: "2Gi" # Required
+        securityContext:
+          capabilities:
+            drop: ["ALL"] # Required
+          allowPrivilegeEscalation: false
+      volumes:
+      - name: codemender-storage
+        persistentVolumeClaim:
+          claimName: codemender-pvc
+      - name: gcs-fuse-src
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: ${SRC_BUCKET}
+            mountOptions: "implicit-dirs"
+            skipCSIBucketAccessCheck: "true"
+      - name: gcs-fuse-out
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: ${OUT_BUCKET}
+            mountOptions: "implicit-dirs"
+            skipCSIBucketAccessCheck: "true"
+      restartPolicy: OnFailure
