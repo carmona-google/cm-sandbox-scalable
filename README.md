@@ -91,13 +91,13 @@ Inside the sandbox, you can run the Codemender client commands against the sourc
 
 ```bash
 # Find vulnerabilities in the source code
-cm find /workspace/src
+cm find /workspace/src/my-project
 
 # Verify findings (can run exploits in the sandbox)
-cm verify /workspace/src
+cm verify /workspace/src/my-project
 
 # Attempt to automatically verify and fix findings
-cm verify fix /workspace/src
+cm verify fix /workspace/src/my-project
 
 # Generate reports
 cm report

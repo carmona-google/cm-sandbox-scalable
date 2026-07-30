@@ -116,6 +116,97 @@ resource "google_compute_subnetwork" "subnet" {
   }
 }
 
+# ---------------------------------------------------------
+# DNS for Private Service Connect / Private Google Access
+# ---------------------------------------------------------
+resource "google_dns_managed_zone" "pa_googleapis_zone" {
+  name        = "pa-googleapis-zone"
+  dns_name    = "pa.googleapis.com."
+  description = "Private DNS zone for Google APIs"
+  visibility  = "private"
+
+  private_visibility_config {
+    networks {
+      network_url = google_compute_network.vpc_network.id
+    }
+  }
+  depends_on = [google_project_service.dns]
+}
+
+resource "google_dns_record_set" "pa_googleapis_a" {
+  name         = "*.pa.googleapis.com."
+  managed_zone = google_dns_managed_zone.pa_googleapis_zone.name
+  type         = "A"
+  ttl          = 300
+  rrdatas      = [google_compute_global_address.psc_ip.address]
+}
+
+resource "google_dns_managed_zone" "googleapis_zone" {
+  name        = "googleapis-zone"
+  dns_name    = "googleapis.com."
+  description = "Private DNS zone for Google APIs"
+  visibility  = "private"
+
+  private_visibility_config {
+    networks {
+      network_url = google_compute_network.vpc_network.id
+    }
+  }
+  depends_on = [google_project_service.dns]
+}
+
+resource "google_dns_record_set" "googleapis_a" {
+  name         = "googleapis.com."
+  managed_zone = google_dns_managed_zone.googleapis_zone.name
+  type         = "A"
+  ttl          = 300
+  rrdatas      = ["199.36.153.8", "199.36.153.9", "199.36.153.10", "199.36.153.11"]
+}
+
+resource "google_dns_record_set" "googleapis_cname" {
+  name         = "*.googleapis.com."
+  managed_zone = google_dns_managed_zone.googleapis_zone.name
+  type         = "CNAME"
+  ttl          = 300
+  rrdatas      = ["restricted.googleapis.com."]
+}
+
+resource "google_dns_record_set" "private_googleapis_a" {
+  name         = "private.googleapis.com."
+  managed_zone = google_dns_managed_zone.googleapis_zone.name
+  type         = "A"
+  ttl          = 300
+  rrdatas      = ["199.36.153.4", "199.36.153.5", "199.36.153.6", "199.36.153.7"]
+}
+
+resource "google_dns_record_set" "restricted_googleapis_a" {
+  name         = "restricted.googleapis.com."
+  managed_zone = google_dns_managed_zone.googleapis_zone.name
+  type         = "A"
+  ttl          = 300
+  rrdatas      = ["199.36.153.8", "199.36.153.9", "199.36.153.10", "199.36.153.11"]
+}
+
+
+# ---------------------------------------------------------
+# Private Service Connect (PSC) for Google APIs
+# ---------------------------------------------------------
+resource "google_compute_global_address" "psc_ip" {
+  name         = "${var.prefix}-psc-ip"
+  address_type = "INTERNAL"
+  purpose      = "PRIVATE_SERVICE_CONNECT"
+  network      = google_compute_network.vpc_network.id
+  address      = "10.129.0.50"
+}
+
+resource "google_compute_global_forwarding_rule" "psc_forwarding_rule" {
+  name                  = "cmsandboxpsc"
+  target                = "all-apis"
+  network               = google_compute_network.vpc_network.id
+  ip_address            = google_compute_global_address.psc_ip.id
+  load_balancing_scheme = ""
+}
+
 
 # ---------------------------------------------------------
 # Artifact Registry
@@ -248,4 +339,11 @@ resource "google_storage_bucket_iam_member" "out_bucket_access" {
   bucket = google_storage_bucket.out_bucket.name
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.codemender_sa.email}"
+}
+
+# Grant project-level storage permissions for GCS Fuse sidecar
+resource "google_project_iam_member" "codemender_storage_admin" {
+  project = var.project_id
+  role    = "roles/storage.admin"
+  member  = "serviceAccount:${google_service_account.codemender_sa.email}"
 }
