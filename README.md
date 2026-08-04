@@ -7,6 +7,14 @@ This repository provides a minimal, secure implementation for running the Google
 
 The sandbox uses GKE Autopilot with the Agent Sandbox (gVisor) feature enabled. Network traffic is isolated using a private VPC and Private Google Access for Google APIs.
 
+Here a custom controller to manage the lifecycle of the sandbox instances.  A sanbox CRD is the primary resource that represents a single, stateful Pod.  It manages the hostnames, identity and persistent storage.  A planned enhancement will add a sandbox router to provide stable endpoints and tunnel traffic to appropriate sandbox pods.  By integrating GKE Pod snapshots, these workloads can be paused and resumed by saving the full state of the container.
+
+The sandbox implements a Default Deny network security posture for all sandboxed environments. This ensures that untrusted code executed inside a sandbox cannot access unauthorized internal networks or the GKE control plane by default. You can define specific network restrictions and allow egress or ingress rules within your SandboxTemplate to provide fine-grained security for specific workloads.
+
+A key feature of this system is the Claim Model that separates the user’s request for an environment (perhaps managed by a platform engineering team) from the specific implementation details.  It lets you request an environment without having to manage the underlying Pod or storage directly.   The request is managed using the SandboxClaim and SandboxTemplate CRDs. To minimize startup latency, a warm pool is used.  This feature allows the Agent Sandbox to provide execution environments in less then one second.  The feature is managed using the SandboxWarmPool CRD. 
+
+Google Cloud storage buckets are presented in the pods through a GCS Fuse mount to ease the input and output of source code and report data.  
+
 ## ToDos
 
 Integrate agent sandbox router functionality to allow usage of the environment remotely via programmatic calls from a pipeline or command line. ( reference https://docs.cloud.google.com/kubernetes-engine/docs/how-to/agent-sandbox )
