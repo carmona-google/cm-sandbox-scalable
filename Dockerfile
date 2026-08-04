@@ -33,10 +33,14 @@ COPY codemender-cli-v0.1.0-20260515-vMvg-916238397.zip .
 # Unzip the client and adjust permissions
 RUN unzip codemender-cli-v0.1.0-20260515-vMvg-916238397.zip && \
     rm codemender-cli-v0.1.0-20260515-vMvg-916238397.zip && \
+    ln -s /opt/codemender/codemender-cli-v0.1.0-20260515-vMvg-916238397/linux-amd64/cm-linux /usr/local/bin/cm && \
     chown -R codemender:codemender /opt/codemender
 
 # Switch to the non-root user
 USER codemender
+
+# Initialize the codemender workspace
+RUN cm init
 
 # Set the entrypoint to a shell or the codemender binary if known.
 # Since we might need to manually run it via `connect.sh` or configure it later,

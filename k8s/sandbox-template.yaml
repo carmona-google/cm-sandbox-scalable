@@ -4,6 +4,7 @@ metadata:
   name: codemender-template
   namespace: default
 spec:
+  networkPolicyManagement: Unmanaged
   podTemplate:
     metadata:
       labels:
@@ -11,25 +12,41 @@ spec:
       annotations:
         gke-gcsfuse/volumes: "true"
     spec:
-      runtimeClassName: gvisor # Required
-      automountServiceAccountToken: false # Required
-      serviceAccountName: codemender-sa
-      securityContext:
-        runAsNonRoot: true # Required
-        runAsUser: 1000
-      nodeSelector:
-        sandbox.gke.io/runtime: gvisor # Required
-      tolerations:
-      - key: "sandbox.gke.io/runtime"
-        value: "gvisor"
-        effect: "NoSchedule" # Required
+      # Set to false to comply with secure-sandbox-policy
+      automountServiceAccountToken: false
+      dnsPolicy: ClusterFirst
       containers:
-      - name: codemender-worker
-        # The image will be replaced by the deploy script to match the region/project
-        image: ${LOCATION}-docker.pkg.dev/${PROJECT_ID}/cm-sandbox-repo/codemender-worker:latest
-        command: ["/bin/sh", "-c"]
-        # Keep the container running so we can exec into it. The codemender client can be run manually or configured later.
-        args: ["sleep 3600000"]
+      - args:
+        - |
+          # Symlink the binary for easier access
+          ln -sf /opt/codemender/codemender-cli-v0.1.0-20260515-vMvg-916238397/linux-amd64/cm-linux /usr/local/bin/cm
+          
+          # Initialize workspace if not already present
+          if [ ! -d "/home/codemender/.codemender" ]; then
+            /usr/local/bin/cm init
+          fi
+          
+          # Apply custom configuration
+          cp /tmp/config/config.yaml /home/codemender/.codemender/config.yaml
+          
+          sleep 3600000
+        command:
+        - /bin/sh
+        - -c
+        image: ${LOCATION}-docker.pkg.dev/${PROJECT_ID}/cm-sandbox-repo/codemender-worker:latest 
+        name: codemender-worker
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+          requests:
+            cpu: 500m
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
         volumeMounts:
         - mountPath: /workspace
           name: codemender-storage
@@ -37,17 +54,22 @@ spec:
           mountPath: /workspace/src
         - name: gcs-fuse-out
           mountPath: /workspace/out
-        resources:
-          requests:
-            cpu: "500m"
-            memory: "1Gi"
-          limits:
-            cpu: "1000m"
-            memory: "2Gi" # Required
-        securityContext:
-          capabilities:
-            drop: ["ALL"] # Required
-          allowPrivilegeEscalation: false
+        - mountPath: /tmp/config
+          name: codemender-config
+      nodeSelector:
+        sandbox.gke.io/runtime: gvisor
+      restartPolicy: OnFailure
+      runtimeClassName: gvisor
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      serviceAccountName: codemender-sa
+      tolerations:
+      - effect: NoSchedule
+        key: sandbox.gke.io/runtime
+        value: gvisor
       volumes:
       - name: codemender-storage
         persistentVolumeClaim:
@@ -56,14 +78,17 @@ spec:
         csi:
           driver: gcsfuse.csi.storage.gke.io
           volumeAttributes:
-            bucketName: ${SRC_BUCKET}
+            bucketName: ${SRC_BUCKET} 
             mountOptions: "implicit-dirs"
             skipCSIBucketAccessCheck: "true"
       - name: gcs-fuse-out
         csi:
           driver: gcsfuse.csi.storage.gke.io
           volumeAttributes:
-            bucketName: ${OUT_BUCKET}
+            bucketName: ${OUT_BUCKET} 
             mountOptions: "implicit-dirs"
             skipCSIBucketAccessCheck: "true"
-      restartPolicy: OnFailure
+      - name: codemender-config
+        configMap:
+          name: codemender-config
+

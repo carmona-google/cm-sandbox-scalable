@@ -32,3 +32,8 @@ output "out_bucket_name" {
   description = "The Output Reports GCS Bucket name"
   value       = google_storage_bucket.out_bucket.name
 }
+
+output "dns_zone_name" {
+  description = "The DNS Managed Zone name"
+  value       = google_dns_managed_zone.pa_googleapis_zone.name
+}

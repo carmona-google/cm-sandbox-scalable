@@ -57,6 +57,8 @@ cat k8s/sandbox-template.yaml | envsubst '${LOCATION} ${PROJECT_ID} ${SRC_BUCKET
 # Also inject PROJECT_ID into rbac.yaml
 cat k8s/rbac.yaml | envsubst '${PROJECT_ID}' | kubectl apply -f -
 
+kubectl apply -f k8s/network-policy.yaml
+kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/pvc.yaml
 kubectl apply -f k8s/sandbox-warmpool.yaml
 
