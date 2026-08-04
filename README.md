@@ -7,6 +7,10 @@ This repository provides a minimal, secure implementation for running the Google
 
 The sandbox uses GKE Autopilot with the Agent Sandbox (gVisor) feature enabled. Network traffic is isolated using a private VPC and Private Google Access for Google APIs.
 
+## ToDos
+
+Integrate agent sandbox router functionality to allow usage of the environment remotely via programmatic calls from a pipeline or command line. ( reference https://docs.cloud.google.com/kubernetes-engine/docs/how-to/agent-sandbox )
+
 ```mermaid
 graph TD
     subgraph "Google Cloud Project"
