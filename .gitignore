@@ -1,4 +1,30 @@
+# Terraform
 terraform/.terraform.lock.hcl
 terraform/.terraform/*
 terraform/terraform.tfstate
 terraform/terraform.tfstate.*
+*.tfvars
+
+# Secrets & Environment
+.env
+.env.*
+*.pem
+*.key
+*credentials*.json
+
+# Binaries & Archives
+*.zip
+*.tar.gz
+cm-linux
+cm-mac
+
+# Python / Flask
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+.coverage
+htmlcov/
