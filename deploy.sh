@@ -59,14 +59,21 @@ cat k8s/rbac.yaml | envsubst '${PROJECT_ID}' | kubectl apply -f -
 kubectl apply -f k8s/network-policy.yaml
 kubectl apply -f k8s/configmap.yaml
 
+# Remove legacy static claim and existing warmpool so pre-warmed pods
+# are recreated with the updated SandboxTemplate and latest worker image
+echo "Recycling legacy SandboxClaim and SandboxWarmPool (if present)..."
+kubectl delete sandboxclaim codemender-claim --ignore-not-found
+kubectl delete sandboxwarmpool codemender-warmpool --ignore-not-found
+
 # Apply SandboxTemplate with local emptyDir staging and GCS FUSE caching
 cat k8s/sandbox-template.yaml | envsubst '${LOCATION} ${PROJECT_ID} ${SRC_BUCKET} ${OUT_BUCKET}' | kubectl apply -f -
 
 # Apply WarmPool with configurable replicas for concurrent execution
 cat k8s/sandbox-warmpool.yaml | envsubst '${WARMPOOL_REPLICAS}' | kubectl apply -f -
 
-# Deploy the Python/Flask Orchestrator API
+# Deploy the Python/Flask Orchestrator API and restart pods to pull the latest image
 cat k8s/orchestrator.yaml | envsubst '${LOCATION} ${PROJECT_ID} ${OUT_BUCKET}' | kubectl apply -f -
+kubectl rollout restart deployment/codemender-orchestrator
 
 echo "======================================"
 echo "Deployment Complete!"

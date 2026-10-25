@@ -34,6 +34,7 @@ spec:
         - /bin/sh
         - -c
         image: ${LOCATION}-docker.pkg.dev/${PROJECT_ID}/cm-sandbox-repo/codemender-worker:latest
+        imagePullPolicy: Always
         name: codemender-worker
         resources:
           limits:

@@ -23,6 +23,7 @@ spec:
       containers:
       - name: orchestrator
         image: ${LOCATION}-docker.pkg.dev/${PROJECT_ID}/cm-sandbox-repo/codemender-orchestrator:latest
+        imagePullPolicy: Always
         ports:
         - containerPort: 8080
         env:
