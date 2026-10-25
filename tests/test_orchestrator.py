@@ -1,5 +1,6 @@
 """Unit tests for the CodeMender GKE Agent Sandbox Flask Orchestrator."""
 
+import tempfile
 from typing import Any, Dict, List
 import unittest
 
@@ -31,8 +32,15 @@ class FakeSandboxBackend:
             raise TimeoutError("Simulated warm pool timeout")
         return f"codemender-warmpool-pod-{claim_name}"
 
-    def exec_scan_in_pod(self, pod_name: str, job: ScanJob) -> Dict[str, Any]:
+    def exec_scan_in_pod(self, pod_name: str, job: ScanJob, on_progress: Any = None) -> Dict[str, Any]:
         self.executed_jobs.append(job)
+        if on_progress:
+            on_progress({
+                "state": "SCANNING",
+                "message": "Running CodeMender on local SSD",
+                "staging_duration_seconds": 2,
+                "scan_duration_seconds": 5,
+            })
         return {
             "exit_code": 0,
             "staging_duration_seconds": 2,
@@ -48,14 +56,20 @@ class OrchestratorTestCase(unittest.TestCase):
     """Tests validation, command generation, and Flask API endpoints."""
 
     def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.state_file = f"{self.temp_dir.name}/scans.json"
         self.backend = FakeSandboxBackend()
         self.orchestrator = SandboxOrchestrator(
             backend=self.backend,
             out_bucket="demo-cm-out-bucket",
             run_async=False,
+            state_file=self.state_file,
         )
         self.app = create_app(self.orchestrator)
         self.client = self.app.test_client()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
 
     def test_healthz_endpoint(self) -> None:
         resp = self.client.get("/healthz")
@@ -105,12 +119,13 @@ class OrchestratorTestCase(unittest.TestCase):
         manifest = build_sandbox_claim_manifest(
             claim_name="cm-claim-abcd1234",
             namespace="default",
-            template_name="codemender-template",
+            warmpool_name="codemender-warmpool",
             scan_id=job.scan_id,
         )
+        self.assertEqual(manifest["apiVersion"], "extensions.agents.x-k8s.io/v1beta1")
         self.assertEqual(manifest["kind"], "SandboxClaim")
         self.assertEqual(
-            manifest["spec"]["sandboxTemplateRef"]["name"], "codemender-template"
+            manifest["spec"]["warmPoolRef"]["name"], "codemender-warmpool"
         )
 
     def test_create_get_and_list_scans_lifecycle(self) -> None:
@@ -139,13 +154,20 @@ class OrchestratorTestCase(unittest.TestCase):
         self.assertEqual(len(self.backend.created_claims), 1)
         self.assertEqual(self.backend.created_claims, self.backend.deleted_claims)
 
-        # Verify GET /api/v1/scans/<scan_id>
-        get_resp = self.client.get(f"/api/v1/scans/{scan_id}")
+        # Verify GET /api/v1/scans/<scan_id> across a second orchestrator instance sharing state_file
+        second_orchestrator = SandboxOrchestrator(
+            backend=self.backend,
+            out_bucket="demo-cm-out-bucket",
+            run_async=False,
+            state_file=self.state_file,
+        )
+        second_client = create_app(second_orchestrator).test_client()
+        get_resp = second_client.get(f"/api/v1/scans/{scan_id}")
         self.assertEqual(get_resp.status_code, 200)
         self.assertEqual(get_resp.get_json()["scan_id"], scan_id)
 
         # Verify GET /api/v1/scans
-        list_resp = self.client.get("/api/v1/scans")
+        list_resp = second_client.get("/api/v1/scans")
         self.assertEqual(list_resp.status_code, 200)
         self.assertEqual(list_resp.get_json()["count"], 1)
 

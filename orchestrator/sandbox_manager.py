@@ -1,28 +1,29 @@
-"""Manages GKE Agent Sandbox claims and headless CodeMender scan execution."""
+"""Kubernetes Agent Sandbox lifecycle and CodeMender scan execution manager."""
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import logging
 import os
+from pathlib import Path
 import re
 import shlex
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 VALID_SCAN_MODES = ("quick", "deep", "diff")
-SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9._/\-]+$")
-SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
-SAFE_REF_RE = re.compile(r"^[A-Za-z0-9._/\-~^]+$")
+SAFE_PATH_RE = re.compile(r"^[a-zA-Z0-9._/\-]+$")
+SAFE_MODEL_RE = re.compile(r"^[a-zA-Z0-9._\-]+$")
+SAFE_REF_RE = re.compile(r"^[a-zA-Z0-9._/\-~^]+$")
 
 
 @dataclass
 class ScanJob:
-    """Represents a CodeMender scan dispatched to a GKE Agent Sandbox."""
+    """Represents the state and metadata of a CodeMender scan job."""
 
     scan_id: str
     target_path: str
@@ -127,11 +128,14 @@ def validate_scan_request(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_sandbox_claim_manifest(
-    claim_name: str, namespace: str, template_name: str, scan_id: str
+    claim_name: str,
+    namespace: str,
+    warmpool_name: str,
+    scan_id: str,
 ) -> Dict[str, Any]:
-    """Constructs the Kubernetes SandboxClaim custom resource manifest."""
+    """Constructs the Kubernetes v1beta1 SandboxClaim custom resource manifest."""
     return {
-        "apiVersion": "extensions.agents.x-k8s.io/v1alpha1",
+        "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
         "kind": "SandboxClaim",
         "metadata": {
             "name": claim_name,
@@ -142,8 +146,8 @@ def build_sandbox_claim_manifest(
             },
         },
         "spec": {
-            "sandboxTemplateRef": {
-                "name": template_name,
+            "warmPoolRef": {
+                "name": warmpool_name,
             }
         },
     }
@@ -167,18 +171,20 @@ class K8sSandboxBackend:
     """Kubernetes API adapter for claiming warm-pool sandboxes and running scans."""
 
     GROUP = "extensions.agents.x-k8s.io"
-    VERSION = "v1alpha1"
+    VERSION = "v1beta1"
     PLURAL = "sandboxclaims"
 
     def __init__(
         self,
         namespace: str = "default",
         template_name: str = "codemender-template",
+        warmpool_name: str = "codemender-warmpool",
         container_name: str = "codemender-worker",
         claim_timeout_seconds: int = 120,
     ) -> None:
         self.namespace = namespace
         self.template_name = template_name
+        self.warmpool_name = warmpool_name
         self.container_name = container_name
         self.claim_timeout_seconds = claim_timeout_seconds
         self._loaded = False
@@ -195,7 +201,7 @@ class K8sSandboxBackend:
         self._loaded = True
 
     def create_claim(self, claim_name: str, scan_id: str) -> Dict[str, Any]:
-        """Creates a SandboxClaim resource in Kubernetes."""
+        """Creates a v1beta1 SandboxClaim resource in Kubernetes."""
         self._ensure_k8s_client()
         from kubernetes import client
 
@@ -203,7 +209,7 @@ class K8sSandboxBackend:
         body = build_sandbox_claim_manifest(
             claim_name=claim_name,
             namespace=self.namespace,
-            template_name=self.template_name,
+            warmpool_name=self.warmpool_name,
             scan_id=scan_id,
         )
         return custom_api.create_namespaced_custom_object(
@@ -231,9 +237,15 @@ class K8sSandboxBackend:
                 plural=self.PLURAL,
                 name=claim_name,
             )
+            claim_meta = claim_obj.get("metadata", {}) or {}
+            claim_annotations = claim_meta.get("annotations", {}) or {}
             status = claim_obj.get("status", {}) or {}
+            sandbox_block = status.get("sandbox") or {}
+
             sandbox_name = (
-                status.get("sandboxName")
+                sandbox_block.get("name")
+                or claim_annotations.get("agents.x-k8s.io/sandbox-name")
+                or status.get("sandboxName")
                 or status.get("podName")
                 or (status.get("sandboxRef") or {}).get("name")
             )
@@ -249,7 +261,7 @@ class K8sSandboxBackend:
                 owner_refs = metadata.owner_references or []
 
                 matches_claim = (
-                    (sandbox_name and metadata.name.startswith(sandbox_name))
+                    (sandbox_name and metadata.name == sandbox_name)
                     or labels.get("agents.x-k8s.io/claim-name") == claim_name
                     or labels.get("extensions.agents.x-k8s.io/claim-name") == claim_name
                     or annotations.get("agents.x-k8s.io/claim-name") == claim_name
@@ -257,6 +269,8 @@ class K8sSandboxBackend:
                     or any(ref.name == sandbox_name for ref in owner_refs if sandbox_name)
                 )
                 if matches_claim and pod.status.phase == "Running":
+                    # Brief pause to allow gVisor warm-pool resume before exec
+                    time.sleep(1.0)
                     return metadata.name
 
             time.sleep(1.5)
@@ -265,7 +279,38 @@ class K8sSandboxBackend:
             f"Timed out waiting for SandboxClaim '{claim_name}' (scan {scan_id}) to bind to a running pod."
         )
 
-    def exec_scan_in_pod(self, pod_name: str, job: ScanJob) -> Dict[str, Any]:
+    def read_pod_status_json(self, pod_name: str, scan_id: str) -> Optional[Dict[str, Any]]:
+        """Reads /workspace/out/<scan_id>/status.json from the bound pod if available."""
+        self._ensure_k8s_client()
+        from kubernetes import client
+        from kubernetes.stream import stream
+
+        core_api = client.CoreV1Api()
+        try:
+            raw_json = stream(
+                core_api.connect_get_namespaced_pod_exec,
+                pod_name,
+                self.namespace,
+                container=self.container_name,
+                command=["cat", f"/workspace/out/{scan_id}/status.json"],
+                stderr=False,
+                stdin=False,
+                stdout=True,
+                tty=False,
+            )
+            parsed = json.loads(raw_json)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug("Could not read status.json from pod %s: %s", pod_name, exc)
+        return None
+
+    def exec_scan_in_pod(
+        self,
+        pod_name: str,
+        job: ScanJob,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
         """Executes /usr/local/bin/run_scan.sh inside the bound sandbox pod."""
         self._ensure_k8s_client()
         from kubernetes import client
@@ -285,27 +330,27 @@ class K8sSandboxBackend:
             tty=False,
             _preload_content=False,
         )
-        ws_client.run_forever(timeout=3600)
+
+        last_poll = time.time()
+        while ws_client.is_open():
+            ws_client.update(timeout=2)
+            if ws_client.peek_stdout():
+                ws_client.read_stdout()
+            if ws_client.peek_stderr():
+                ws_client.read_stderr()
+            if on_progress and (time.time() - last_poll) >= 5.0:
+                last_poll = time.time()
+                live_status = self.read_pod_status_json(pod_name, job.scan_id)
+                if live_status:
+                    on_progress(live_status)
+
+        ws_client.close()
         exit_code = ws_client.returncode or 0
 
         status_data: Dict[str, Any] = {"exit_code": exit_code}
-        try:
-            raw_json = stream(
-                core_api.connect_get_namespaced_pod_exec,
-                pod_name,
-                self.namespace,
-                container=self.container_name,
-                command=["cat", f"/workspace/out/{job.scan_id}/status.json"],
-                stderr=False,
-                stdin=False,
-                stdout=True,
-                tty=False,
-            )
-            parsed = json.loads(raw_json)
-            if isinstance(parsed, dict):
-                status_data.update(parsed)
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.debug("Could not read status.json from pod %s: %s", pod_name, exc)
+        final_status = self.read_pod_status_json(pod_name, job.scan_id)
+        if final_status:
+            status_data.update(final_status)
 
         return status_data
 
@@ -337,15 +382,51 @@ class SandboxOrchestrator:
         backend: Optional[Any] = None,
         out_bucket: str = "",
         run_async: bool = True,
+        state_file: str = "",
     ) -> None:
         self.backend = backend or K8sSandboxBackend(
             namespace=os.environ.get("K8S_NAMESPACE", "default"),
             template_name=os.environ.get("SANDBOX_TEMPLATE_NAME", "codemender-template"),
+            warmpool_name=os.environ.get("SANDBOX_WARMPOOL_NAME", "codemender-warmpool"),
         )
         self.out_bucket = out_bucket or os.environ.get("OUT_BUCKET", "")
         self.run_async = run_async
+        self.state_file = Path(
+            state_file or os.environ.get("ORCHESTRATOR_STATE_FILE", "/tmp/codemender_scans.json")
+        )
         self._jobs: Dict[str, ScanJob] = {}
         self._lock = threading.Lock()
+        self._load_state()
+
+    def _load_state(self) -> None:
+        """Loads persisted scan jobs from disk if present."""
+        if not self.state_file.exists():
+            return
+        try:
+            raw = json.loads(self.state_file.read_text())
+            if isinstance(raw, dict):
+                for scan_id, data in raw.items():
+                    if isinstance(data, dict):
+                        valid_keys = ScanJob.__dataclass_fields__.keys()
+                        filtered = {k: v for k, v in data.items() if k in valid_keys}
+                        self._jobs[scan_id] = ScanJob(**filtered)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug("Could not load state file %s: %s", self.state_file, exc)
+
+    def _save_state_locked(self) -> None:
+        """Persists current scan jobs to disk (must be called under self._lock)."""
+        try:
+            serialized = {
+                scan_id: {
+                    k: getattr(job, k) for k in ScanJob.__dataclass_fields__.keys()
+                }
+                for scan_id, job in self._jobs.items()
+            }
+            tmp_path = self.state_file.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(serialized, indent=2))
+            tmp_path.replace(self.state_file)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug("Could not persist state file %s: %s", self.state_file, exc)
 
     def submit_scan(self, payload: Dict[str, Any]) -> ScanJob:
         """Validates parameters, creates a ScanJob, and dispatches execution."""
@@ -366,7 +447,9 @@ class SandboxOrchestrator:
         )
 
         with self._lock:
+            self._load_state()
             self._jobs[scan_id] = job
+            self._save_state_locked()
 
         if self.run_async:
             worker_thread = threading.Thread(
@@ -378,16 +461,18 @@ class SandboxOrchestrator:
         else:
             self._execute_job(scan_id)
 
-        return job
+        return self.get_scan(scan_id) or job
 
     def _update_job(self, scan_id: str, **kwargs: Any) -> None:
         with self._lock:
+            self._load_state()
             job = self._jobs.get(scan_id)
             if not job:
                 return
             for key, value in kwargs.items():
                 setattr(job, key, value)
             job.updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self._save_state_locked()
 
     def _execute_job(self, scan_id: str) -> None:
         job = self.get_scan(scan_id)
@@ -410,7 +495,20 @@ class SandboxOrchestrator:
                 message=f"Bound to warm sandbox pod {pod_name}; staging to local SSD and scanning",
             )
 
-            result = self.backend.exec_scan_in_pod(pod_name, job)
+            def _progress_cb(live: Dict[str, Any]) -> None:
+                self._update_job(
+                    scan_id,
+                    state=live.get("state", "RUNNING"),
+                    message=live.get("message", f"Running on {pod_name}"),
+                    staging_duration_seconds=int(live.get("staging_duration_seconds", 0)),
+                    scan_duration_seconds=int(live.get("scan_duration_seconds", 0)),
+                )
+
+            try:
+                result = self.backend.exec_scan_in_pod(pod_name, job, on_progress=_progress_cb)
+            except TypeError:
+                result = self.backend.exec_scan_in_pod(pod_name, job)
+
             exit_code = int(result.get("exit_code", 0))
             stage_sec = int(result.get("staging_duration_seconds", 0))
             scan_sec = int(result.get("scan_duration_seconds", 0))
@@ -443,10 +541,12 @@ class SandboxOrchestrator:
 
     def get_scan(self, scan_id: str) -> Optional[ScanJob]:
         with self._lock:
+            self._load_state()
             return self._jobs.get(scan_id)
 
     def list_scans(self) -> List[ScanJob]:
         with self._lock:
+            self._load_state()
             return sorted(
                 self._jobs.values(),
                 key=lambda j: j.created_at,
@@ -455,6 +555,7 @@ class SandboxOrchestrator:
 
     def cancel_or_delete_scan(self, scan_id: str) -> Optional[ScanJob]:
         with self._lock:
+            self._load_state()
             job = self._jobs.get(scan_id)
         if not job:
             return None
