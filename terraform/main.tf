@@ -66,6 +66,11 @@ resource "google_project_service" "iam" {
   disable_on_destroy = false
 }
 
+resource "google_project_service" "aiplatform" {
+  service            = "aiplatform.googleapis.com"
+  disable_on_destroy = false
+}
+
 # ---------------------------------------------------------
 # Random suffix for globally unique bucket names
 # ---------------------------------------------------------
@@ -345,5 +350,12 @@ resource "google_storage_bucket_iam_member" "out_bucket_access" {
 resource "google_project_iam_member" "codemender_storage_admin" {
   project = var.project_id
   role    = "roles/storage.admin"
+  member  = "serviceAccount:${google_service_account.codemender_sa.email}"
+}
+
+# Grant Vertex AI permissions for CodeMender Interactions API (iAPI)
+resource "google_project_iam_member" "codemender_aiplatform_user" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
   member  = "serviceAccount:${google_service_account.codemender_sa.email}"
 }

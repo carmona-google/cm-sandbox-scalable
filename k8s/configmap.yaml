@@ -6,7 +6,7 @@ metadata:
 data:
   config.yaml: |
     server:
-      endpoint: "codemender.pa.googleapis.com:443"
+      endpoint: "https://aiplatform.googleapis.com"
     scan:
       extensions:
         include: [".py", ".java", ".go", ".js", ".ts", ".c", ".cc", ".cpp", ".h", ".rb", ".php"]
