@@ -100,7 +100,7 @@ def validate_scan_request(payload: Dict[str, Any]) -> Dict[str, Any]:
             f"Invalid 'scan_mode' '{scan_mode}'. Allowed values: {', '.join(VALID_SCAN_MODES)}."
         )
 
-    model = str(payload.get("model", "")).strip()
+    model = str(payload.get("model", "")).strip().lower()
     if model and not SAFE_MODEL_RE.match(model):
         raise ValueError("Invalid 'model' identifier.")
 

@@ -93,11 +93,12 @@ class OrchestratorTestCase(unittest.TestCase):
         valid = validate_scan_request({
             "target_path": "/my-repo/service-a",
             "scan_mode": "deep",
-            "model": "gemini-3.8-flash",
+            "model": "gemini-4-Argon",
             "workers": 8,
         })
         self.assertEqual(valid["target_path"], "my-repo/service-a")
         self.assertEqual(valid["scan_mode"], "deep")
+        self.assertEqual(valid["model"], "gemini-4-argon")
         self.assertEqual(valid["workers"], 8)
 
     def test_build_worker_command_and_claim_manifest(self) -> None:

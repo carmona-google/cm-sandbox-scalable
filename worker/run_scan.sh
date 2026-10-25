@@ -101,6 +101,7 @@ case "${SCAN_MODE}" in
     CM_ARGS+=("--diff=${DIFF_REF}" "--diff-workers" "${WORKERS}")
     ;;
   quick|*)
+    CM_ARGS+=("--quick")
     ;;
 esac
 
