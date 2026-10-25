@@ -33,23 +33,27 @@ spec:
         command:
         - /bin/sh
         - -c
-        image: ${LOCATION}-docker.pkg.dev/${PROJECT_ID}/cm-sandbox-repo/codemender-worker:latest 
+        image: ${LOCATION}-docker.pkg.dev/${PROJECT_ID}/cm-sandbox-repo/codemender-worker:latest
         name: codemender-worker
         resources:
           limits:
+            cpu: 2000m
+            memory: 4Gi
+            ephemeral-storage: 10Gi
+          requests:
             cpu: 1000m
             memory: 2Gi
-          requests:
-            cpu: 500m
-            memory: 1Gi
+            ephemeral-storage: 5Gi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
             drop:
             - ALL
         volumeMounts:
-        - mountPath: /workspace
-          name: codemender-storage
+        # Fast node-local SSD workspace to stage code before running cm
+        # Eliminates GCS FUSE latency and avoids ReadWriteOnce multi-attach bottlenecks
+        - mountPath: /workspace/local-work
+          name: codemender-local-work
         - name: gcs-fuse-src
           mountPath: /workspace/src
         - name: gcs-fuse-out
@@ -71,24 +75,23 @@ spec:
         key: sandbox.gke.io/runtime
         value: gvisor
       volumes:
-      - name: codemender-storage
-        persistentVolumeClaim:
-          claimName: codemender-pvc
+      - name: codemender-local-work
+        emptyDir:
+          sizeLimit: 10Gi
       - name: gcs-fuse-src
         csi:
           driver: gcsfuse.csi.storage.gke.io
           volumeAttributes:
-            bucketName: ${SRC_BUCKET} 
-            mountOptions: "implicit-dirs"
+            bucketName: ${SRC_BUCKET}
+            mountOptions: "implicit-dirs,metadata-cache:ttl-secs:3600,file-cache:max-size-mb:1024"
             skipCSIBucketAccessCheck: "true"
       - name: gcs-fuse-out
         csi:
           driver: gcsfuse.csi.storage.gke.io
           volumeAttributes:
-            bucketName: ${OUT_BUCKET} 
+            bucketName: ${OUT_BUCKET}
             mountOptions: "implicit-dirs"
             skipCSIBucketAccessCheck: "true"
       - name: codemender-config
         configMap:
           name: codemender-config
-

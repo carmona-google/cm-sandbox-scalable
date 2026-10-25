@@ -6,6 +6,6 @@ metadata:
   labels:
     app: codemender-warmpool
 spec:
-  replicas: 1
+  replicas: ${WARMPOOL_REPLICAS}
   sandboxTemplateRef:
     name: codemender-template
