@@ -1,130 +1,135 @@
 # cm-gke-as
-# Codemender GKE Agent Sandbox
+# Scalable CodeMender GKE Agent Sandbox
 
-This repository provides a minimal, secure implementation for running the Google Cloud Codemender client (CMOC) in a highly isolated environment using Google Kubernetes Engine (GKE) Agent Sandbox.
+This repository provides a scalable, secure, and headless architecture for running the Google Cloud CodeMender client (`cm`) inside isolated **Google Kubernetes Engine (GKE) Agent Sandboxes (gVisor)** orchestrated by a **Python + Flask REST API**.
 
-## Architecture
+## Architecture & Scalability Improvements
 
-The sandbox uses GKE Autopilot with the Agent Sandbox (gVisor) feature enabled. Network traffic is isolated using a private VPC and Private Google Access for Google APIs.
-
-Here a custom controller to manage the lifecycle of the sandbox instances.  A sanbox CRD is the primary resource that represents a single, stateful Pod.  It manages the hostnames, identity and persistent storage.  A planned enhancement will add a sandbox router to provide stable endpoints and tunnel traffic to appropriate sandbox pods.  By integrating GKE Pod snapshots, these workloads can be paused and resumed by saving the full state of the container.
-
-The sandbox implements a Default Deny network security posture for all sandboxed environments. This ensures that untrusted code executed inside a sandbox cannot access unauthorized internal networks or the GKE control plane by default. You can define specific network restrictions and allow egress or ingress rules within your SandboxTemplate to provide fine-grained security for specific workloads.
-
-A key feature of this system is the Claim Model that separates the user’s request for an environment (perhaps managed by a platform engineering team) from the specific implementation details.  It lets you request an environment without having to manage the underlying Pod or storage directly.   The request is managed using the SandboxClaim and SandboxTemplate CRDs. To minimize startup latency, a warm pool is used.  This feature allows the Agent Sandbox to provide execution environments in less then one second.  The feature is managed using the SandboxWarmPool CRD. 
-
-Google Cloud storage buckets are presented in the pods through a GCS Fuse mount to ease the input and output of source code and report data.  
-
-## ToDos
-
-Integrate agent sandbox router functionality to allow usage of the environment remotely via programmatic calls from a pipeline or command line. ( reference https://docs.cloud.google.com/kubernetes-engine/docs/how-to/agent-sandbox )
+### Why Direct GCS FUSE Scanning Was Slow (and How This Architecture Fixes It)
+1. **Fast Local Ephemeral SSD Staging (`emptyDir`):**
+   Running `cm find` directly on a GCS FUSE mount (`/workspace/src`) translates every POSIX directory walk, `grep`, `read_file`, and compiler call into remote HTTP requests over gVisor's user-space kernel. In this scalable design, [`worker/run_scan.sh`](worker/run_scan.sh) stages the target codebase from `/workspace/src/<target>` into node-local ephemeral SSD storage (`/workspace/local-work/<scan_id>`) before running CodeMender, eliminating GCS FUSE I/O latency during scanning.
+2. **No Shared `ReadWriteOnce` PVC Bottleneck:**
+   Each sandbox pod uses its own isolated `emptyDir` workspace (`10Gi` limit) and isolated `CM_HOME` SQLite database instead of a single shared `ReadWriteOnce` PVC. This allows the `SandboxWarmPool` to scale horizontally across multiple GKE Autopilot nodes without `Multi-Attach` volume errors.
+3. **Headless Python/Flask Orchestrator API:**
+   Instead of manually running `kubectl exec` via `connect.sh` into a single pod, the **Flask Orchestrator Service** ([`orchestrator/app.py`](orchestrator/app.py)) exposes a REST API (`/api/v1/scans`). Each scan request dynamically creates a `SandboxClaim` (`extensions.agents.x-k8s.io/v1alpha1`), binds to a pre-warmed gVisor pod in under a second, runs the staged scan headlessly (`quick`, `deep` with parallel workers, or `diff`), exports `JSON`, `SARIF`, `HTML`, and `Markdown` reports to the GCS output bucket, and releases the claim when finished.
 
 ```mermaid
 graph TD
-    subgraph "Google Cloud Project"
-        subgraph "VPC Network (cm-sandbox-vpc)"
-            subgraph "Private Subnet (10.0.0.0/16)"
-                GKE["GKE Autopilot Cluster<br>(Agent Sandbox Enabled)"]
-                PVC[("PersistentVolumeClaim<br>10Gi")]
-                
-                subgraph AgentSandboxPool ["Agent Sandbox Pool"]
-                    W[SandboxWarmPool]
-                    Pod1["Codemender Sandbox Pod 1"]
-                    Pod2["Codemender Sandbox Pod n (Warm)"]
-                    W -.-> Pod2
-                end
-                
-                Pod1 --- PVC
-                Pod1 -.->|GCS Fuse| FUSE["GCS Fuse Sidecar"]
-            end
-        end
-        
-        GAR[("Artifact Registry")]
-        GCS_SRC[("Source Code Bucket")]
-        GCS_OUT[("Output Reports Bucket")]
-        API["Codemender API"]
+    Client["CI/CD Pipeline or Developer"] -->|POST /api/v1/scans| Orchestrator["Flask Orchestrator API<br/>(K8s Deployment)"]
+    Orchestrator -->|1. Creates SandboxClaim| K8sAPI["Kubernetes API<br/>(Agent Sandbox Controller)"]
+    WarmPool["SandboxWarmPool<br/>(N Pre-Warmed gVisor Pods)"] -.->|Sub-second binding| SandboxPod["Claimed CodeMender Worker Pod"]
+    Orchestrator -->|2. Dispatches run_scan.sh| SandboxPod
+
+    subgraph SandboxPod ["CodeMender gVisor Sandbox Pod"]
+        FUSE_SRC["/workspace/src<br/>(Cached GCS FUSE Mount)"] -->|1. Fast Local Copy| LocalWork["/workspace/local-work<br/>(Node Local emptyDir SSD)"]
+        CM["CodeMender CLI (cm)<br/>(--deep / --diff / --model)"] -->|2. Native Speed Scan| LocalWork
+        CM -->|3. Exports JSON / SARIF / HTML| FUSE_OUT["/workspace/out/<scan_id><br/>(GCS FUSE Output Bucket)"]
     end
-    
-    GKE -->|Private Google Access| API
-    GKE -.->|Pulls Image| GAR
-    FUSE -->|Private Google Access| GCS_SRC
-    FUSE -->|Private Google Access| GCS_OUT
 ```
 
 ## Prerequisites
 
-1.  **Google Cloud SDK (`gcloud`)** installed and authenticated.
-2.  **Terraform** (`>= 1.3.0`) installed.
-3.  **Docker** installed (for building the Codemender image).
-4.  **envsubst** installed (usually part of `gettext` package).
-5.  A Google Cloud Project with billing enabled.
+1. **Google Cloud SDK (`gcloud`)** installed and authenticated.
+2. **Terraform** (`>= 1.3.0`) installed.
+3. **Docker** installed (for building the worker and orchestrator images).
+4. **envsubst** installed (part of `gettext`).
+5. A Google Cloud Project with billing enabled.
 
 ## Deployment Instructions
 
 ### 1. Set Environment Variables
 
 ```bash
-export PROJECT_ID="your-google-cloud-project-id"
-export LOCATION="us-central1" # Optional, defaults to us-central1
-export PREFIX="cm-sandbox"    # Optional, defaults to cm-sandbox
+export PROJECT_ID="[YOUR_PROJECT_ID]"
+export LOCATION="us-central1"       # Optional, defaults to us-central1
+export PREFIX="cm-sandbox"          # Optional, defaults to cm-sandbox
+export WARMPOOL_REPLICAS="3"        # Number of pre-warmed gVisor sandboxes
 ```
 
 ### 2. Run the Deployment Script
 
-The `deploy.sh` script automates the entire process:
-1. Provision infrastructure via Terraform (VPC, Subnet, Artifact Registry, GKE Cluster, Workload Identity, enabling APIs, and GCS buckets).
-2. Builds the Codemender Docker image (installing tools like C, C++, Java, Node.js, Python, Go) and pushes to Artifact Registry.
-3. Deploys Kubernetes manifests (PVC, SandboxTemplate, SandboxWarmPool, SandboxClaim, RBAC) utilizing GCS Fuse to mount the created buckets.
+The [`deploy.sh`](deploy.sh) script automates the entire deployment:
+1. Provisions infrastructure via Terraform (VPC, Private Service Connect, Private DNS, Artifact Registry, GKE Autopilot with Agent Sandbox, Workload Identity, and GCS buckets).
+2. Builds and pushes both the `codemender-worker` and `codemender-orchestrator` Docker images.
+3. Deploys the Kubernetes RBAC, `SandboxTemplate` (with local `emptyDir` staging and GCS FUSE caching), `SandboxWarmPool`, and `codemender-orchestrator` Deployment.
 
 ```bash
 ./deploy.sh
 ```
 
-## Using Codemender
+## Triggering Scalable Scans via the Flask Orchestrator API
 
-### 1. Prepare Source Code
-The Terraform deployment created two Cloud Storage buckets for you (with randomly generated suffixes). You can find their names in the Terraform output. 
-
-Upload the source code you wish to analyze to the **source bucket**.
+### 1. Upload Source Code to the Source Bucket
 
 ```bash
-gcloud storage cp -r my-project/ gs://cm-sandbox-src-xxxxxx/
+gcloud storage cp -r my-project/ gs://${SRC_BUCKET}/my-project/
 ```
 
-### 2. Connect to the Sandbox
-Drop into an interactive shell inside the secure, isolated gVisor sandbox. The container environment has the source bucket mounted at `/workspace/src` and the output bucket mounted at `/workspace/out`.
+### 2. Port-Forward or Expose the Orchestrator Service
 
 ```bash
+kubectl port-forward svc/codemender-orchestrator-svc 8080:80
+```
+
+### 3. Submit Concurrent Scans (`POST /api/v1/scans`)
+
+#### Quick Scan (Default, with fast model)
+```bash
+curl -X POST http://localhost:8080/api/v1/scans \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_path": "my-project",
+    "scan_mode": "quick",
+    "model": "gemini-3.8-flash"
+  }'
+```
+
+#### Exhaustive Multi-Worker Deep Scan (`--deep`)
+```bash
+curl -X POST http://localhost:8080/api/v1/scans \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_path": "my-project",
+    "scan_mode": "deep",
+    "workers": 8,
+    "model": "gemini-3.8-flash"
+  }'
+```
+
+#### PR / CI Delta Scan (`--diff`)
+```bash
+curl -X POST http://localhost:8080/api/v1/scans \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_path": "my-project",
+    "scan_mode": "diff",
+    "diff_ref": "origin/main",
+    "workers": 4
+  }'
+```
+
+### 4. Check Scan Status & Retrieve Reports (`GET /api/v1/scans/<scan_id>`)
+
+```bash
+# Check status and timing breakdown (staging_duration_seconds vs scan_duration_seconds)
+curl http://localhost:8080/api/v1/scans/<scan_id>
+
+# Download exported reports from the GCS output bucket
+gcloud storage cp -r gs://${OUT_BUCKET}/<scan_id>/ ./reports/
+```
+
+## Running Unit Tests Locally
+
+```bash
+PYTHONPATH=. python3 -m unittest discover -s tests -v
+```
+
+## Interactive Debugging (Optional)
+
+If you still want to open an interactive shell inside a sandbox pod for manual testing:
+```bash
+kubectl apply -f k8s/sandbox-claim.yaml
 ./connect.sh
-```
-
-### 3. Run Codemender Commands
-Inside the sandbox, you can run the Codemender client commands against the source code. The client will execute within the sandboxed context, compiling and verifying code.
-
-```bash
-# Find vulnerabilities in the source code
-cm find /workspace/src/my-project
-
-# Verify findings (can run exploits in the sandbox)
-cm verify /workspace/src/my-project
-
-# Attempt to automatically verify and fix findings
-cm verify fix /workspace/src/my-project
-
-# Generate reports
-cm report
-```
-
-### 4. Retrieve Reports
-Codemender outputs its HTML and MD reports to `~/.codemender/reports` by default. To retrieve them, copy them from the home directory into the mounted GCS output bucket.
-
-```bash
-cp -r ~/.codemender/reports/* /workspace/out/
-```
-
-You can then retrieve the reports from the Cloud Storage bucket to your local machine:
-```bash
-gcloud storage cp gs://cm-sandbox-out-xxxxxx/report.html .
 ```
 
 ## Clean Up

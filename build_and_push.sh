@@ -9,15 +9,24 @@ fi
 LOCATION=${LOCATION:-us-central1}
 PREFIX=${PREFIX:-cm-sandbox}
 REPO_NAME="${PREFIX}-repo"
-IMAGE_NAME="${LOCATION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/codemender-worker:latest"
+WORKER_IMAGE="${LOCATION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/codemender-worker:latest"
+ORCHESTRATOR_IMAGE="${LOCATION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/codemender-orchestrator:latest"
 
 echo "Authenticating Docker to Artifact Registry..."
 gcloud auth configure-docker ${LOCATION}-docker.pkg.dev --quiet
 
-echo "Building Docker image..."
-docker build -t ${IMAGE_NAME} .
+echo "Building CodeMender Worker Docker image..."
+docker build -t ${WORKER_IMAGE} .
 
-echo "Pushing Docker image to Artifact Registry..."
-docker push ${IMAGE_NAME}
+echo "Pushing CodeMender Worker Docker image to Artifact Registry..."
+docker push ${WORKER_IMAGE}
 
-echo "Successfully built and pushed ${IMAGE_NAME}"
+echo "Building Flask Orchestrator Docker image..."
+docker build -f orchestrator/Dockerfile.orchestrator -t ${ORCHESTRATOR_IMAGE} .
+
+echo "Pushing Flask Orchestrator Docker image to Artifact Registry..."
+docker push ${ORCHESTRATOR_IMAGE}
+
+echo "Successfully built and pushed:"
+echo " - ${WORKER_IMAGE}"
+echo " - ${ORCHESTRATOR_IMAGE}"

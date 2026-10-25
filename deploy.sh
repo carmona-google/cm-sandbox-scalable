@@ -8,6 +8,7 @@ fi
 
 export LOCATION=${LOCATION:-us-central1}
 export PREFIX=${PREFIX:-cm-sandbox}
+export WARMPOOL_REPLICAS=${WARMPOOL_REPLICAS:-3}
 
 echo "======================================"
 echo "1. Applying Terraform Configuration"
@@ -29,7 +30,7 @@ terraform apply -auto-approve -var="project_id=${PROJECT_ID}" -var="region=${LOC
 cd ..
 
 echo "======================================"
-echo "2. Building and Pushing Docker Image"
+echo "2. Building and Pushing Docker Images"
 echo "======================================"
 ./build_and_push.sh
 
@@ -45,28 +46,30 @@ export OUT_BUCKET=$(cd terraform && terraform output -raw out_bucket_name)
 
 echo "Source Bucket: $SRC_BUCKET"
 echo "Output Bucket: $OUT_BUCKET"
+echo "WarmPool Replicas: $WARMPOOL_REPLICAS"
 
 echo "======================================"
 echo "4. Deploying Kubernetes Manifests"
 echo "======================================"
 
-# Apply substituting env vars for the image repository and GCS buckets
-# Note: we use envsubst to inject LOCATION, PROJECT_ID, SRC_BUCKET, and OUT_BUCKET into sandbox-template.yaml
-cat k8s/sandbox-template.yaml | envsubst '${LOCATION} ${PROJECT_ID} ${SRC_BUCKET} ${OUT_BUCKET}' | kubectl apply -f -
-
-# Also inject PROJECT_ID into rbac.yaml
+# Apply RBAC (worker and orchestrator ServiceAccounts + Roles)
 cat k8s/rbac.yaml | envsubst '${PROJECT_ID}' | kubectl apply -f -
 
+# Apply NetworkPolicy and ConfigMap
 kubectl apply -f k8s/network-policy.yaml
 kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/pvc.yaml
-kubectl apply -f k8s/sandbox-warmpool.yaml
 
-echo "Waiting for Warm Pool to create the sandbox..."
-sleep 10
-kubectl apply -f k8s/sandbox-claim.yaml
+# Apply SandboxTemplate with local emptyDir staging and GCS FUSE caching
+cat k8s/sandbox-template.yaml | envsubst '${LOCATION} ${PROJECT_ID} ${SRC_BUCKET} ${OUT_BUCKET}' | kubectl apply -f -
+
+# Apply WarmPool with configurable replicas for concurrent execution
+cat k8s/sandbox-warmpool.yaml | envsubst '${WARMPOOL_REPLICAS}' | kubectl apply -f -
+
+# Deploy the Python/Flask Orchestrator API
+cat k8s/orchestrator.yaml | envsubst '${LOCATION} ${PROJECT_ID} ${OUT_BUCKET}' | kubectl apply -f -
 
 echo "======================================"
 echo "Deployment Complete!"
-echo "Check sandbox status with: kubectl get sandbox,pod"
+echo "Check warm pool and orchestrator status with:"
+echo "  kubectl get sandboxwarmpool,sandbox,pod,svc"
 echo "======================================"
